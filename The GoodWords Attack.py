@@ -269,3 +269,174 @@ print(f"[+] Testing accuracy: {test_acc:.4f}")
 y_pred = classifier.predict(X_test_vec)
 print("\n[*] Classification Report:")
 print(classification_report(y_test, y_pred))
+
+#################################################################
+# GoodWords Extraction (White-Box)
+#################################################################
+
+print("\n[*] Extracting GoodWords from model...")
+
+# Get feature names and probabilities
+feature_names = vectorizer.get_feature_names_out()
+ham_log_probs = classifier.feature_log_prob_[0]  # Ham class
+spam_log_probs = classifier.feature_log_prob_[1]  # Spam class
+
+#################################################################
+# Calculating Goodness Scores
+#################################################################
+
+# Calculate goodness scores
+goodness_scores = []
+for i, word in enumerate(feature_names):
+    ham_prob = np.exp(ham_log_probs[i])
+    spam_prob = np.exp(spam_log_probs[i])
+    goodness = ham_prob / (spam_prob + 1e-10)
+    goodness_scores.append((word, goodness, ham_prob, spam_prob))
+
+#################################################################
+# Selecting Top Good Words
+#################################################################
+
+# Sort by goodness
+goodness_scores.sort(key=lambda x: x[1], reverse=True)
+top_good_words = goodness_scores[:100]
+
+print(f"[+] Top 10 GoodWords (most 'ham-like'):")
+for word, score, hp, sp in top_good_words[:10]:
+    print(f"    {word:15} | goodness: {score:8.2f} | ham_p: {hp:.4f} | spam_p: {sp:.4f}")
+
+#################################################################
+# Extracting Spam Test Messages
+#################################################################
+
+print("\n[*] Testing GoodWords attack...")
+
+# Extract only spam messages for testing
+spam_test_messages = X_test[y_test == 'spam']
+print(f"[+] Testing on {len(spam_test_messages)} spam messages")
+
+#################################################################
+# Setting Up the Experiment
+#################################################################
+
+# Define test points from baseline (0) to saturation (40)
+word_counts = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+attack_results = []
+
+print(f"[*] Testing word counts: {word_counts}")
+
+#################################################################
+# Implementing the Attack Loop
+#################################################################
+
+for num_words in word_counts:
+    # Select the top N good words for this iteration
+    selected_words = [w for w, _, _, _ in top_good_words[:num_words]]
+
+    # Show which words we're using (first iteration only for clarity)
+    if num_words == 5:
+        print(f"  Using words: {', '.join(selected_words)}")
+
+#################################################################
+# Message Augmentation Function
+#################################################################
+
+def augment_message(message, words_to_add):
+    """Append good words to a message"""
+    if len(words_to_add) > 0:
+        return message + " " + " ".join(words_to_add)
+    return message
+
+# Test augmentation on one example using the top 5 words
+sample_spam = spam_test_messages[0]
+sample_augmented = augment_message(
+    sample_spam,
+    [w for w, _, _, _ in top_good_words[:5]]
+)
+print(f"\nOriginal: {sample_spam[:50]}...")
+print(f"Augmented: {sample_augmented[:80]}...")
+
+#################################################################
+# Testing Evasion for Each Configuration
+#################################################################
+
+for num_words in word_counts:
+    # Select the top N good words for this iteration
+    selected_words = [w for w, _, _, _ in top_good_words[:num_words]]
+
+    # Count how many spam messages evade after augmentation
+    evaded = 0
+    for message in spam_test_messages:
+        # Augment the message
+        augmented = augment_message(message, selected_words)
+
+        # Transform and predict
+        vec = vectorizer.transform([augmented])
+        prob = classifier.predict_proba(vec)[0]
+
+        # Check evasion: ham probability > spam probability
+        if prob[0] > prob[1]:
+            evaded += 1
+
+    # Record results for this configuration
+    evasion_rate = (evaded / len(spam_test_messages)) * 100
+    attack_results.append({
+        'num_words': num_words,
+        'evasion_rate': evasion_rate,
+        'evaded': evaded,
+        'total': len(spam_test_messages)
+    })
+
+    print(f"  Words: {num_words:2d} | Evasion: {evasion_rate:6.2f}% ({evaded}/{len(spam_test_messages)})")
+
+# The binary decision discards probability magnitude, caring only about which class wins.
+# This creates an attack optimization target: we need only shift probabilities across 0.5, not drive them to extremes.
+
+# Convert to DataFrame for easy plotting
+results_df = pd.DataFrame(attack_results)
+
+#################################################################
+# Attack Effectiveness Visualization
+#################################################################
+
+plt.style.use('dark_background')
+fig, ax = plt.subplots(figsize=(12, 6), facecolor=NODE_BLACK)
+
+ax.plot(results_df['num_words'], results_df['evasion_rate'],
+        marker='o', markersize=8, linewidth=2.5,
+        color=HTB_GREEN, markeredgecolor='white', markeredgewidth=1)
+
+ax.fill_between(results_df['num_words'], 0, results_df['evasion_rate'],
+                alpha=0.3, color=HTB_GREEN)
+
+# Add threshold lines
+ax.axhline(y=50, color=NUGGET_YELLOW, linestyle='--', alpha=0.7, label='50% threshold')
+ax.axhline(y=90, color=AZURE, linestyle='--', alpha=0.7, label='90% threshold')
+
+# Highlight maximum
+max_idx = results_df['evasion_rate'].idxmax()
+max_rate = results_df.loc[max_idx, 'evasion_rate']
+max_words = results_df.loc[max_idx, 'num_words']
+ax.scatter(max_words, max_rate, s=200, color=MALWARE_RED, zorder=5)
+ax.annotate(f'Peak: {max_rate:.1f}%\n@ {max_words} words',
+           xy=(max_words, max_rate), xytext=(max_words+5, max_rate-10),
+           color='white', fontsize=10,
+           arrowprops=dict(arrowstyle='->', color=MALWARE_RED, lw=1.5))
+
+ax.set_xlabel('Number of Good Words Added', fontsize=12, color=HTB_GREEN)
+ax.set_ylabel('Evasion Rate (%)', fontsize=12, color=HTB_GREEN)
+ax.set_title('GoodWords Attack Effectiveness', fontsize=14, color=HTB_GREEN, pad=20)
+ax.grid(True, alpha=0.2)
+ax.set_facecolor(NODE_BLACK)
+ax.legend()
+
+for spine in ax.spines.values():
+    spine.set_color(HACKER_GREY)
+ax.tick_params(colors=HACKER_GREY)
+
+plt.tight_layout()
+output_dir = Path("attachments")
+output_dir.mkdir(exist_ok=True)
+plt.savefig(output_dir / "attack_effectiveness.png", dpi=150, facecolor=NODE_BLACK)
+plt.close()
+print(f"\n[+] Plot saved to {output_dir / 'attack_effectiveness.png'}")
